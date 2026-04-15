@@ -1038,6 +1038,22 @@ footer {{
 .dp-title {{
   font-size: 16px; font-weight: 700; color: var(--text1);
   line-height: 1.4; word-break: break-word;
+  width: 100%; border: none; background: transparent; resize: none;
+  font-family: inherit; padding: 0; outline: none;
+  border-bottom: 1.5px solid transparent; transition: border-color 0.15s;
+}}
+.dp-title:focus {{ border-bottom-color: var(--navy); }}
+.dp-desc {{
+  width: 100%; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); font-family: inherit; font-size: 12.5px;
+  color: var(--text1); line-height: 1.5; padding: 8px 10px;
+  resize: none; outline: none; min-height: 60px;
+  transition: border-color 0.15s; box-sizing: border-box;
+}}
+.dp-desc:focus {{ border-color: var(--navy); background: var(--white); }}
+.dp-desc::placeholder {{ color: var(--text3); }}
+.dp-desc-wrap {{
+  padding: 0 16px 14px; flex-shrink: 0; background: var(--white);
 }}
 .dp-props {{
   padding: 4px 16px 14px; flex-shrink: 0; background: var(--white);
@@ -1226,7 +1242,11 @@ footer {{
   </div>
   <!-- Title -->
   <div class="dp-title-area">
-    <h2 class="dp-title" id="dp-title"></h2>
+    <textarea class="dp-title" id="dp-title" rows="1"
+      placeholder="Task title"
+      onkeydown="if(event.key==='Enter'){{event.preventDefault();this.blur();}}"
+      oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px';"
+      onblur="dpSaveTitle(this.value)"></textarea>
   </div>
   <!-- Properties -->
   <div class="dp-props">
@@ -1242,6 +1262,11 @@ footer {{
   <div class="dp-added-at" id="dp-added-at"></div>
   <!-- Separator -->
   <hr class="dp-sep">
+  <!-- Description -->
+  <div class="dp-desc-wrap">
+    <textarea class="dp-desc" id="dp-desc" placeholder="Add details&#8230;"
+      onblur="dpSaveDesc(this.value)"></textarea>
+  </div>
   <!-- Activity log -->
   <div class="dp-activity">
     <div class="dp-activity-heading">Activity Log</div>
@@ -1832,7 +1857,13 @@ function renderDetail(t) {{
   var stVal  = t.status || (t.done ? 'done' : 'todo');
   var catVal = t.category || '';
 
-  document.getElementById('dp-title').textContent = t.text;
+  var titleEl = document.getElementById('dp-title');
+  titleEl.value = t.text;
+  titleEl.style.height = 'auto';
+  titleEl.style.height = titleEl.scrollHeight + 'px';
+
+  var descEl = document.getElementById('dp-desc');
+  descEl.value = t.description || '';
 
   var starBtn = document.getElementById('dp-star-btn');
   starBtn.innerHTML = t.today ? '&#9733;' : '&#9734;';
@@ -1885,6 +1916,30 @@ function dpToggleStar() {{
       break;
     }}
   }}
+}}
+
+function dpSaveTitle(val) {{
+  val = val.trim();
+  if (!val || !detailTaskId) return;
+  for (var i = 0; i < allTasks.length; i++) {{
+    if (allTasks[i].id === detailTaskId) {{
+      allTasks[i].text = val;
+      break;
+    }}
+  }}
+  go('update', detailTaskId, {{text: val}});
+  applyFilters();
+}}
+
+function dpSaveDesc(val) {{
+  if (!detailTaskId) return;
+  for (var i = 0; i < allTasks.length; i++) {{
+    if (allTasks[i].id === detailTaskId) {{
+      allTasks[i].description = val;
+      break;
+    }}
+  }}
+  go('update', detailTaskId, {{description: val}});
 }}
 
 function dpDelete() {{
@@ -2023,7 +2078,7 @@ if HAS_WEBKIT:
                 # Inline triage edit — save to disk, no full page reload
                 for t in app.data["tasks"]:
                     if t["id"] == tid:
-                        for field in ("category", "project", "status"):
+                        for field in ("category", "project", "status", "text", "description"):
                             val = extra.get(field)
                             if val is not None:
                                 t[field] = val
