@@ -1259,14 +1259,14 @@ footer {{
       <div id="dp-cat-wrap"></div>
     </div>
   </div>
-  <div class="dp-added-at" id="dp-added-at"></div>
-  <!-- Separator -->
-  <hr class="dp-sep">
   <!-- Description -->
   <div class="dp-desc-wrap">
     <textarea class="dp-desc" id="dp-desc" placeholder="Add details&#8230;"
       onblur="dpSaveDesc(this.value)"></textarea>
   </div>
+  <div class="dp-added-at" id="dp-added-at"></div>
+  <!-- Separator -->
+  <hr class="dp-sep">
   <!-- Activity log -->
   <div class="dp-activity">
     <div class="dp-activity-heading">Activity Log</div>
