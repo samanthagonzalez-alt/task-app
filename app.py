@@ -1625,10 +1625,10 @@ function buildProjectFilter() {{
 function updateTask(id, field, value) {{
   for (var i=0; i<allTasks.length; i++) {{
     if (allTasks[i].id===id) {{
+      var oldStatus = (field==='status') ? (allTasks[i].status || 'todo') : null;
       allTasks[i][field] = value;
       if (field==='status') {{
         var wasDone = allTasks[i].done;
-        var oldStatus = allTasks[i].status || 'todo';
         allTasks[i].done = (value==='done');
         if (allTasks[i].done && !wasDone) {{
           allTasks[i].completedAt = new Date().toISOString();
@@ -2216,11 +2216,12 @@ class KeyablePanel(AppKit.NSPanel):
         return True
 
     def sendEvent_(self, event):
-        # NSNonactivatingPanel never auto-promotes itself to key window; we do it
-        # manually on mouse-down so keyboard shortcuts always reach the webview.
+        # NSNonactivatingPanel never activates the app; we do it on every click
+        # so that Cmd+C/V/X reach the WKWebView as normal key equivalents.
         if event.type() == AppKit.NSEventTypeLeftMouseDown:
             if not self.isKeyWindow():
                 self.makeKeyWindow()
+            AppKit.NSApp.activateIgnoringOtherApps_(True)
         AppKit.NSPanel.sendEvent_(self, event)
 
 class TodoBarApp(AppKit.NSObject):
