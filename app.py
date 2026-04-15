@@ -1053,7 +1053,11 @@ footer {{
 .dp-desc:focus {{ border-color: var(--navy); background: var(--white); }}
 .dp-desc::placeholder {{ color: var(--text3); }}
 .dp-desc-wrap {{
-  padding: 0 16px 14px; flex-shrink: 0; background: var(--white);
+  padding: 0 16px 12px; flex-shrink: 0; background: var(--white);
+}}
+.dp-section-label {{
+  font-size: 11px; font-weight: 600; color: var(--text3);
+  text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 5px;
 }}
 .dp-props {{
   padding: 4px 16px 14px; flex-shrink: 0; background: var(--white);
@@ -1100,6 +1104,15 @@ footer {{
 }}
 .dp-add-btn:hover {{ background: #4A5A97; }}
 .dp-notes-list {{ display: flex; flex-direction: column; gap: 14px; }}
+.dp-note-item.system {{ padding-right: 0; flex-direction: row; align-items: center; gap: 8px; }}
+.dp-note-item.system .dp-note-ts {{ font-weight: 400; color: var(--text3); white-space: nowrap; }}
+.dp-note-item.system .dp-note-text {{
+  font-size: 11.5px; color: var(--text3); font-style: italic;
+}}
+.dp-note-item.system::before {{
+  content: ''; display: block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--navy); opacity: 0.35; flex-shrink: 0;
+}}
 .dp-note-item {{
   display: flex; flex-direction: column; gap: 3px;
   position: relative; padding-right: 22px;
@@ -1261,7 +1274,8 @@ footer {{
   </div>
   <!-- Description -->
   <div class="dp-desc-wrap">
-    <textarea class="dp-desc" id="dp-desc" placeholder="Add details&#8230;"
+    <div class="dp-section-label">Details</div>
+    <textarea class="dp-desc" id="dp-desc"
       onblur="dpSaveDesc(this.value)"></textarea>
   </div>
   <div class="dp-added-at" id="dp-added-at"></div>
@@ -1614,11 +1628,29 @@ function updateTask(id, field, value) {{
       allTasks[i][field] = value;
       if (field==='status') {{
         var wasDone = allTasks[i].done;
+        var oldStatus = allTasks[i].status || 'todo';
         allTasks[i].done = (value==='done');
         if (allTasks[i].done && !wasDone) {{
           allTasks[i].completedAt = new Date().toISOString();
         }} else if (!allTasks[i].done) {{
           allTasks[i].completedAt = null;
+        }}
+        // Record status change in the activity log
+        if (oldStatus !== value) {{
+          var statusLabels = {{todo:'To Do',in_progress:'In Progress',waiting:'Waiting',done:'Done'}};
+          var now = new Date();
+          var mo = now.getMonth()+1, day = now.getDate(), yr = now.getFullYear();
+          var h = now.getHours(), m = now.getMinutes();
+          var ampm = h>=12?'PM':'AM'; h = h%12||12;
+          var ts = mo+'/'+day+'/'+yr+' '+h+':'+(m<10?'0':'')+m+' '+ampm;
+          var note = {{
+            text: 'Status changed from '+(statusLabels[oldStatus]||oldStatus)+' → '+(statusLabels[value]||value),
+            timestamp: ts,
+            system: true
+          }};
+          if (!allTasks[i].notes) allTasks[i].notes = [];
+          allTasks[i].notes.push(note);
+          go('add-note', id, {{text: note.text, timestamp: ts, system: true}});
         }}
         // In Today's Plan view, move waiting tasks to the bottom of their category
         if (value === 'waiting' && currentTab === 'today') {{
@@ -1895,11 +1927,18 @@ function renderDetail(t) {{
     var html = '';
     for (var ni = notes.length - 1; ni >= 0; ni--) {{
       var n = notes[ni];
-      html += '<div class="dp-note-item">' +
-        '<div class="dp-note-ts">' + esc(n.timestamp) + '</div>' +
-        '<div class="dp-note-text">' + linkify(n.text) + '</div>' +
-        '<button class="dp-note-del" onclick="dpDeleteNote(' + ni + ')" title="Delete note">&#x2715;</button>' +
-        '</div>';
+      if (n.system) {{
+        html += '<div class="dp-note-item system">' +
+          '<div class="dp-note-ts">' + esc(n.timestamp) + '</div>' +
+          '<div class="dp-note-text">' + esc(n.text) + '</div>' +
+          '</div>';
+      }} else {{
+        html += '<div class="dp-note-item">' +
+          '<div class="dp-note-ts">' + esc(n.timestamp) + '</div>' +
+          '<div class="dp-note-text">' + linkify(n.text) + '</div>' +
+          '<button class="dp-note-del" onclick="dpDeleteNote(' + ni + ')" title="Delete note">&#x2715;</button>' +
+          '</div>';
+      }}
     }}
     notesList.innerHTML = html;
   }}
@@ -2115,7 +2154,10 @@ if HAS_WEBKIT:
                         if t["id"] == tid:
                             if not isinstance(t.get("notes"), list):
                                 t["notes"] = []
-                            t["notes"].append({"text": note_text, "timestamp": note_ts})
+                            note = {"text": note_text, "timestamp": note_ts}
+                            if extra.get("system"):
+                                note["system"] = True
+                            t["notes"].append(note)
                             break
                     save_data(app.data)
 
