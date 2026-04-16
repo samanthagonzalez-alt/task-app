@@ -814,6 +814,34 @@ header h1 {{ font-size: 15px; font-weight: 700; color: var(--navy); letter-spaci
   font-size: 9px; font-weight: 700; border-radius: 8px;
   padding: 1px 4px; line-height: 1.4; pointer-events: none;
 }}
+.search-icon-btn {{
+  flex: 0 0 auto; padding: 9px 14px; position: relative;
+  border-left: 1px solid var(--border);
+}}
+.search-icon-btn.active {{ color: var(--navy); }}
+/* Search bar */
+.search-bar {{
+  display: none; align-items: center; gap: 8px;
+  padding: 8px 14px; background: var(--white);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}}
+.search-bar.open {{ display: flex; }}
+.search-input {{
+  flex: 1; border: 1.5px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; font-family: inherit;
+  color: var(--text1); background: var(--bg); outline: none;
+  transition: border-color 0.15s;
+}}
+.search-input:focus {{ border-color: var(--navy); }}
+.search-clear {{
+  background: none; border: none; font-size: 15px; line-height: 1;
+  color: var(--text3); cursor: pointer; padding: 2px 4px; flex-shrink: 0;
+  transition: color 0.12s;
+}}
+.search-clear:hover {{ color: var(--pink); }}
+.search-count {{
+  font-size: 11px; color: var(--text3); flex-shrink: 0; white-space: nowrap;
+}}
 
 /* Filter bar */
 .filters {{
@@ -1162,6 +1190,16 @@ footer {{
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style="display:block;pointer-events:none"><path d="M1 2h11l-4 4.8V11L5 9.5V6.8L1 2z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>
     <span class="filter-badge" id="filter-badge" style="display:none">0</span>
   </button>
+  <button class="tab search-icon-btn" id="search-toggle-btn" onclick="toggleSearch()" title="Search">
+    <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style="display:block;pointer-events:none"><circle cx="5.5" cy="5.5" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 8.5L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+  </button>
+</div>
+
+<div class="search-bar" id="search-bar">
+  <input class="search-input" id="search-input" type="text" placeholder="Search tasks, details, notes&#x2026;"
+    oninput="onSearchInput(this.value)">
+  <span class="search-count" id="search-count"></span>
+  <button class="search-clear" id="search-clear-btn" onclick="clearSearch()" title="Clear search" style="display:none">&#x2715;</button>
 </div>
 
 <div class="view-bar">
@@ -1297,6 +1335,7 @@ var allTasks     = {tasks_json};
 var currentTab   = 'today';
 var currentView  = 'all';
 var detailTaskId = null;
+var searchQuery  = '';
 
 var CAT_OPTS = [
   ['', 'Category\u2026'],
@@ -1471,19 +1510,34 @@ function fmtCompleted(iso) {{
   return mo + ' ' + day + ' at ' + h + ':' + (m<10?'0':'')+m + ' ' + ampm;
 }}
 
+function taskMatchesSearch(t, q) {{
+  if (!q) return true;
+  if ((t.text || '').toLowerCase().indexOf(q) !== -1) return true;
+  if ((t.description || '').toLowerCase().indexOf(q) !== -1) return true;
+  if (t.notes && t.notes.length) {{
+    for (var i = 0; i < t.notes.length; i++) {{
+      if ((t.notes[i].text || '').toLowerCase().indexOf(q) !== -1) return true;
+    }}
+  }}
+  return false;
+}}
 function applyFilters() {{
   var fCat     = csValues('cs-cat');
   var fProj    = csValues('cs-proj');
   var fStatus  = csValues('cs-status');
   var showComp = (currentView === 'completed');
   var anyFilter = fCat.length || fProj.length || fStatus.length;
+  var q = searchQuery;
 
   var filtered = allTasks.filter(function(t) {{
-    if (currentTab === 'today' && !t.today) return false;
+    if (!q) {{
+      // normal tab filter only when not searching
+      if (currentTab === 'today' && !t.today) return false;
+    }}
     if (showComp) {{
-      if (!isDone(t)) return false;   // show ONLY completed
+      if (!isDone(t)) return false;
     }} else {{
-      if (isDone(t)) return false;    // hide completed
+      if (isDone(t)) return false;
       var vst = t.status || 'todo';
       if (currentView === 'active'  && vst !== 'todo' && vst !== 'in_progress') return false;
       if (currentView === 'waiting' && vst !== 'waiting') return false;
@@ -1494,6 +1548,7 @@ function applyFilters() {{
       var st = t.status || (t.done ? 'done' : 'todo');
       if (fStatus.indexOf(st) === -1) return false;
     }}
+    if (q && !taskMatchesSearch(t, q)) return false;
     return true;
   }});
 
@@ -1521,6 +1576,12 @@ function applyFilters() {{
     clearEl.classList.remove('visible');
   }}
   updateFilterBadge();
+
+  // update search result count
+  var scountEl = document.getElementById('search-count');
+  if (scountEl) {{
+    scountEl.textContent = q ? (filtered.length + ' result' + (filtered.length!==1?'s':'')) : '';
+  }}
 }}
 
 function clearFilters() {{
@@ -1581,6 +1642,33 @@ function toggleFilters() {{
   var btn   = document.getElementById('filter-toggle-btn');
   panel.classList.toggle('open');
   btn.classList.toggle('active', panel.classList.contains('open'));
+}}
+function toggleSearch() {{
+  var bar = document.getElementById('search-bar');
+  var btn = document.getElementById('search-toggle-btn');
+  var open = bar.classList.toggle('open');
+  btn.classList.toggle('active', open);
+  if (open) {{
+    document.getElementById('search-input').focus();
+  }} else {{
+    clearSearch();
+  }}
+}}
+function onSearchInput(val) {{
+  searchQuery = val.trim().toLowerCase();
+  var clearBtn  = document.getElementById('search-clear-btn');
+  clearBtn.style.display = searchQuery ? '' : 'none';
+  applyFilters();
+}}
+function clearSearch() {{
+  searchQuery = '';
+  var inp = document.getElementById('search-input');
+  if (inp) inp.value = '';
+  var clearBtn = document.getElementById('search-clear-btn');
+  if (clearBtn) clearBtn.style.display = 'none';
+  var countEl = document.getElementById('search-count');
+  if (countEl) countEl.textContent = '';
+  applyFilters();
 }}
 document.addEventListener('click', function(e) {{
   if (!e.target.closest('.cs-wrap')) {{
