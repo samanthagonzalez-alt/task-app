@@ -2466,10 +2466,12 @@ class TodoBarApp(AppKit.NSObject):
         x  = int(vf.origin.x + vf.size.width) - w   # flush to right edge
         y  = int(vf.origin.y)                        # bottom of visible frame
 
-        # NonactivatingPanel (128) — clicks inside don't steal focus from other apps
+        # Style mask 0 = borderless, activating panel — app gains focus on click so
+        # Cmd+V/C/X reach the WKWebView correctly.  NSNonactivatingPanel (128) prevented
+        # app activation even when we called activateIgnoringOtherApps_, breaking paste.
         self.panel = KeyablePanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, w, h),
-            128,   # NSWindowStyleMaskNonactivatingPanel only — borderless (no title bar)
+            0,     # NSWindowStyleMaskBorderless — no title bar, activates on click
             AppKit.NSBackingStoreBuffered,
             False,
         )
