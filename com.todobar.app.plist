@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.todobar.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>-W</string>
+        <string>ignore</string>
+        <string>/Users/samantha.gonzalez/todo-bar/app.py</string>
+    </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/samantha.gonzalez/todo-bar/launch.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/samantha.gonzalez/todo-bar/launch.log</string>
+</dict>
+</plist>
