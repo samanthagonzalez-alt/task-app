@@ -2384,14 +2384,17 @@ class WindowManager:
 
     def _prompt_permission(self):
         def _show():
+            import sys
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("Accessibility Permission Required")
             alert.setInformativeText_(
                 "My Tasks needs Accessibility access to resize other windows.\n\n"
-                "1. Click “Open System Settings”\n"
-                "2. Enable python3 under Accessibility\n"
-                "3. Return here and click “Restart App” — "
-                "macOS requires a restart to apply the permission."
+                "1. Click Open System Settings\n"
+                "2. Look for Python (NOT python3) -- it has a Python/rocket icon.\n"
+                "   Toggle it on. If not listed, click + and navigate to:\n"
+                "   /Library/Developer/CommandLineTools/Library/Frameworks/"
+                "Python3.framework/Versions/3.9/Resources/Python.app\n\n"
+                "3. Return here and click Restart App to apply."
             )
             alert.addButtonWithTitle_("Open System Settings")
             alert.addButtonWithTitle_("Restart App")
@@ -2405,7 +2408,6 @@ class WindowManager:
                     )
                 )
             elif resp == AppKit.NSAlertSecondButtonReturn:
-                import sys
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
 
