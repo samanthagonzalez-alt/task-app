@@ -2617,6 +2617,7 @@ class TodoBarApp(AppKit.NSObject):
         release_instance()
 
     def applicationWillTerminate_(self, notif):
+        AppKit.NSNotificationCenter.defaultCenter().removeObserver_(self)
         release_instance()
 
     def applicationDidFinishLaunching_(self, notif):
@@ -2731,6 +2732,16 @@ class TodoBarApp(AppKit.NSObject):
         btn.setTarget_(self)
         btn.setAction_("togglePanel:")
 
+    def panelDidChangeScreen_(self, notif):
+        if not self.panel.isVisible():
+            return
+        scr = (self.panel.screen() or AppKit.NSScreen.mainScreen()).frame()
+        screen_frame = (scr.origin.x, scr.origin.y, scr.size.width, scr.size.height)
+        def _do():
+            self._window_manager.pop()
+            self._window_manager.push(PANEL_WIDTH, screen_frame)
+        threading.Thread(target=_do, daemon=True).start()
+
     def togglePanel_(self, sender):
         if self.panel.isVisible():
             self.panel.orderOut_(None)
@@ -2778,6 +2789,15 @@ class TodoBarApp(AppKit.NSObject):
         self.panel.setCollectionBehavior_(1 | 16 | 256)
         # Stay visible when the user switches to another app
         self.panel.setHidesOnDeactivate_(False)
+
+        # Watch for the panel moving to a different screen so we can
+        # restore windows on the old screen and adjust the new one.
+        AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self,
+            objc.selector(self.panelDidChangeScreen_, selector=b"panelDidChangeScreen:"),
+            AppKit.NSWindowDidChangeScreenNotification,
+            self.panel,
+        )
 
         if HAS_WEBKIT:
             self._setup_webview()
