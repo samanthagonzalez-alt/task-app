@@ -2378,13 +2378,19 @@ class WindowManager:
             if x + w > right_limit:
                 new_w = max(right_limit - x, 100)
                 updates.append((ax_win, x, y, new_w, h))
-        # Apply all resizes atomically to avoid visible stagger
-        AppKit.NSDisableScreenUpdates()
-        try:
-            for ax_win, x, y, new_w, h in updates:
-                self._set_frame(ax_win, x, y, new_w, h)
-        finally:
-            AppKit.NSEnableScreenUpdates()
+        # Apply all resizes atomically — NSDisable/EnableScreenUpdates must
+        # run on the main thread, so we block here until it's done.
+        done = threading.Event()
+        def _apply():
+            AppKit.NSDisableScreenUpdates()
+            try:
+                for ax_win, x, y, new_w, h in updates:
+                    self._set_frame(ax_win, x, y, new_w, h)
+            finally:
+                AppKit.NSEnableScreenUpdates()
+            done.set()
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
+        done.wait(timeout=5)
 
     def pop(self):
         if not self._saved or not self._ax_trusted():
@@ -2395,12 +2401,17 @@ class WindowManager:
             if s:
                 updates.append((ax_win, s["pos"][0], s["pos"][1], s["size"][0], s["size"][1]))
         self._saved.clear()
-        AppKit.NSDisableScreenUpdates()
-        try:
-            for ax_win, x, y, w, h in updates:
-                self._set_frame(ax_win, x, y, w, h)
-        finally:
-            AppKit.NSEnableScreenUpdates()
+        done = threading.Event()
+        def _apply():
+            AppKit.NSDisableScreenUpdates()
+            try:
+                for ax_win, x, y, w, h in updates:
+                    self._set_frame(ax_win, x, y, w, h)
+            finally:
+                AppKit.NSEnableScreenUpdates()
+            done.set()
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
+        done.wait(timeout=5)
 
     def _ax_trusted(self):
         return bool(_AS.AXIsProcessTrustedWithOptions(None))
