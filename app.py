@@ -2387,20 +2387,26 @@ class WindowManager:
             alert = AppKit.NSAlert.alloc().init()
             alert.setMessageText_("Accessibility Permission Required")
             alert.setInformativeText_(
-                "My Tasks needs Accessibility access to resize other windows "
-                "when the panel opens.\n\n"
-                "Open System Settings → Privacy & Security → Accessibility "
-                "and enable python3 (or My Tasks)."
+                "My Tasks needs Accessibility access to resize other windows.\n\n"
+                "1. Click “Open System Settings”\n"
+                "2. Enable python3 under Accessibility\n"
+                "3. Return here and click “Restart App” — "
+                "macOS requires a restart to apply the permission."
             )
             alert.addButtonWithTitle_("Open System Settings")
+            alert.addButtonWithTitle_("Restart App")
             alert.addButtonWithTitle_("Not Now")
-            if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
+            resp = alert.runModal()
+            if resp == AppKit.NSAlertFirstButtonReturn:
                 AppKit.NSWorkspace.sharedWorkspace().openURL_(
                     AppKit.NSURL.URLWithString_(
                         "x-apple.systempreferences:"
                         "com.apple.preference.security?Privacy_Accessibility"
                     )
                 )
+            elif resp == AppKit.NSAlertSecondButtonReturn:
+                import sys
+                os.execv(sys.executable, [sys.executable] + sys.argv)
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
 
     def _iter_wins(self):
