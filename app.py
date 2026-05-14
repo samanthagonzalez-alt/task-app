@@ -2401,6 +2401,11 @@ class WindowManager:
             alert.addButtonWithTitle_("Not Now")
             resp = alert.runModal()
             if resp == AppKit.NSAlertFirstButtonReturn:
+                # Reveal Python.app in Finder so user can drag it to Accessibility list
+                import subprocess
+                subprocess.Popen(["open", "-R",
+                    "/Library/Developer/CommandLineTools/Library/Frameworks/"
+                    "Python3.framework/Versions/3.9/Resources/Python.app"])
                 AppKit.NSWorkspace.sharedWorkspace().openURL_(
                     AppKit.NSURL.URLWithString_(
                         "x-apple.systempreferences:"
