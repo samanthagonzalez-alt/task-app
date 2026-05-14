@@ -70,6 +70,12 @@ _CF.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
 _CF.CFBooleanGetValue.restype  = ctypes.c_bool
 _CF.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
 
+# CFDictionary helpers for AXIsProcessTrustedWithOptions prompt
+_CF.CFDictionaryCreate.restype  = ctypes.c_void_p
+_CF.CFDictionaryCreate.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ctypes.c_long,   ctypes.c_void_p, ctypes.c_void_p]
+
 _kAXValueCGPointType   = 1
 _kAXValueCGSizeType    = 2
 _kCFStringEncodingUTF8 = 0x08000100
@@ -2382,38 +2388,48 @@ class WindowManager:
     def _ax_trusted(self):
         return bool(_AS.AXIsProcessTrustedWithOptions(None))
 
+    def _request_ax_with_native_prompt(self):
+        """Trigger the macOS native Accessibility permission dialog."""
+        kCFBooleanTrue = ctypes.c_void_p.in_dll(_CF, "kCFBooleanTrue").value
+        kKeyCallbacks  = ctypes.addressof(ctypes.c_char.in_dll(_CF, "kCFTypeDictionaryKeyCallBacks"))
+        kValCallbacks  = ctypes.addressof(ctypes.c_char.in_dll(_CF, "kCFTypeDictionaryValueCallBacks"))
+        _CF.CFStringCreateWithCString.restype  = ctypes.c_void_p
+        _CF.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        key  = _CF.CFStringCreateWithCString(None, b"AXTrustedCheckOptionPrompt", _kCFStringEncodingUTF8)
+        keys = (ctypes.c_void_p * 1)(key)
+        vals = (ctypes.c_void_p * 1)(kCFBooleanTrue)
+        opts = _CF.CFDictionaryCreate(None, keys, vals, 1, kKeyCallbacks, kValCallbacks)
+        result = bool(_AS.AXIsProcessTrustedWithOptions(opts))
+        _CF.CFRelease(opts)
+        _CF.CFRelease(key)
+        return result
+
     def _prompt_permission(self):
         def _show():
             import sys
+            # First try the native macOS prompt — it opens System Settings
+            # automatically with the correct app pre-selected
+            trusted = self._request_ax_with_native_prompt()
+            if trusted:
+                return
+            # If native prompt ran but still not trusted, offer restart
             alert = AppKit.NSAlert.alloc().init()
-            alert.setMessageText_("Accessibility Permission Required")
+            alert.setMessageText_("One More Step")
             alert.setInformativeText_(
-                "My Tasks needs Accessibility access to resize other windows.\n\n"
-                "1. Click Open System Settings\n"
-                "2. Look for Python (NOT python3) -- it has a Python/rocket icon.\n"
-                "   Toggle it on. If not listed, click + and navigate to:\n"
-                "   /Library/Developer/CommandLineTools/Library/Frameworks/"
-                "Python3.framework/Versions/3.9/Resources/Python.app\n\n"
-                "3. Return here and click Restart App to apply."
+                "System Settings should have opened.\n\n"
+                "Enable the toggle next to Python in the Accessibility list, "
+                "then click Restart App below."
             )
-            alert.addButtonWithTitle_("Open System Settings")
             alert.addButtonWithTitle_("Restart App")
             alert.addButtonWithTitle_("Not Now")
-            resp = alert.runModal()
-            if resp == AppKit.NSAlertFirstButtonReturn:
-                # Reveal Python.app in Finder so user can drag it to Accessibility list
-                import subprocess
-                subprocess.Popen(["open", "-R",
+            if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
+                full_app = (
                     "/Library/Developer/CommandLineTools/Library/Frameworks/"
-                    "Python3.framework/Versions/3.9/Resources/Python.app"])
-                AppKit.NSWorkspace.sharedWorkspace().openURL_(
-                    AppKit.NSURL.URLWithString_(
-                        "x-apple.systempreferences:"
-                        "com.apple.preference.security?Privacy_Accessibility"
-                    )
+                    "Python3.framework/Versions/3.9/Resources/Python.app/"
+                    "Contents/MacOS/Python"
                 )
-            elif resp == AppKit.NSAlertSecondButtonReturn:
-                os.execv(sys.executable, [sys.executable] + sys.argv)
+                script = os.path.abspath(sys.argv[0])
+                os.execv(full_app, [full_app, script])
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
 
     def _iter_wins(self):
