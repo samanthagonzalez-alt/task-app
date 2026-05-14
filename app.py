@@ -2402,7 +2402,7 @@ class WindowManager:
         if not self._saved or not self._ax_trusted():
             return
         updates = []
-        for pid, idx, ax_win in self._iter_wins():
+        for pid, idx, ax_win in self._iter_wins(all_screens=True):
             s = self._saved.get((pid, idx))
             if s:
                 _CF.CFRetain(ax_win)
@@ -2468,14 +2468,15 @@ class WindowManager:
                 os.execv(full_app, [full_app, script])
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
 
-    def _iter_wins(self, screen_frame=None):
+    def _iter_wins(self, screen_frame=None, all_screens=False):
         our_pid = os.getpid()
-        if screen_frame:
-            scr_x, scr_w = screen_frame[0], screen_frame[2]
-        else:
-            sf = AppKit.NSScreen.mainScreen().frame()
-            scr_x, scr_w = sf.origin.x, sf.size.width
-        ws           = AppKit.NSWorkspace.sharedWorkspace()
+        if not all_screens:
+            if screen_frame:
+                scr_x, scr_w = screen_frame[0], screen_frame[2]
+            else:
+                sf = AppKit.NSScreen.mainScreen().frame()
+                scr_x, scr_w = sf.origin.x, sf.size.width
+        ws = AppKit.NSWorkspace.sharedWorkspace()
         for app in ws.runningApplications():
             pid = app.processIdentifier()
             if pid == our_pid:
@@ -2501,11 +2502,12 @@ class WindowManager:
                     continue
                 if self._ax_bool(ax_win, "AXFullScreen"):
                     continue
-                frame = self._get_frame(ax_win)
-                if frame is None:
-                    continue
-                if not (scr_x <= frame[0] < scr_x + scr_w):
-                    continue
+                if not all_screens:
+                    frame = self._get_frame(ax_win)
+                    if frame is None:
+                        continue
+                    if not (scr_x <= frame[0] < scr_x + scr_w):
+                        continue
                 yield pid, i, ax_win
             _CF.CFRelease(wins_ref)
 
