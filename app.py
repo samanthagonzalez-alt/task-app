@@ -18,6 +18,9 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+import ctypes
+import ctypes.util
+
 import AppKit
 import objc
 from Foundation import NSMakeRect
@@ -27,6 +30,55 @@ try:
     HAS_WEBKIT = True
 except ImportError:
     HAS_WEBKIT = False
+
+# ── AXUIElement / CoreFoundation ctypes bindings ──────────────────────────────
+_AS = ctypes.CDLL(ctypes.util.find_library("ApplicationServices"))
+_CF = ctypes.CDLL(ctypes.util.find_library("CoreFoundation"))
+
+_AS.AXIsProcessTrustedWithOptions.restype  = ctypes.c_bool
+_AS.AXIsProcessTrustedWithOptions.argtypes = [ctypes.c_void_p]
+
+_AS.AXUIElementCreateApplication.restype  = ctypes.c_void_p
+_AS.AXUIElementCreateApplication.argtypes = [ctypes.c_int32]
+
+_AS.AXUIElementCopyAttributeValue.restype  = ctypes.c_int
+_AS.AXUIElementCopyAttributeValue.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+
+_AS.AXUIElementSetAttributeValue.restype  = ctypes.c_int
+_AS.AXUIElementSetAttributeValue.argtypes = [
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+
+_AS.AXValueCreate.restype  = ctypes.c_void_p
+_AS.AXValueCreate.argtypes = [ctypes.c_int, ctypes.c_void_p]
+
+_AS.AXValueGetValue.restype  = ctypes.c_bool
+_AS.AXValueGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+_CF.CFRelease.restype  = None
+_CF.CFRelease.argtypes = [ctypes.c_void_p]
+
+_CF.CFStringCreateWithCString.restype  = ctypes.c_void_p
+_CF.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+
+_CF.CFArrayGetCount.restype  = ctypes.c_long
+_CF.CFArrayGetCount.argtypes = [ctypes.c_void_p]
+
+_CF.CFArrayGetValueAtIndex.restype  = ctypes.c_void_p
+_CF.CFArrayGetValueAtIndex.argtypes = [ctypes.c_void_p, ctypes.c_long]
+
+_CF.CFBooleanGetValue.restype  = ctypes.c_bool
+_CF.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+
+_kAXValueCGPointType   = 1
+_kAXValueCGSizeType    = 2
+_kCFStringEncodingUTF8 = 0x08000100
+
+class _CGPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+
+class _CGSize(ctypes.Structure):
+    _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DATA_FILE         = Path.home() / ".todo-bar" / "tasks.json"
@@ -2294,6 +2346,168 @@ if HAS_WEBKIT:
                 save_data(app.data)
                 app._refresh(); app._update_badge()
 
+# ── Window manager ────────────────────────────────────────────────────────────
+class WindowManager:
+    """Resize all visible main-screen windows to clear room for the panel, then restore."""
+
+    def __init__(self):
+        self._saved = {}   # (pid, win_idx) → {"pos": (x,y), "size": (w,h)}
+
+    def push(self, panel_width):
+        if not self._ax_trusted():
+            self._prompt_permission()
+            return
+        sf          = AppKit.NSScreen.mainScreen().frame()
+        right_limit = sf.size.width - panel_width
+        self._saved.clear()
+        for pid, idx, ax_win in self._iter_wins():
+            frame = self._get_frame(ax_win)
+            if frame is None:
+                continue
+            x, y, w, h = frame
+            self._saved[(pid, idx)] = {"pos": (x, y), "size": (w, h)}
+            if x + w > right_limit:
+                new_w = max(right_limit - x, 100)
+                self._set_frame(ax_win, x, y, new_w, h)
+
+    def pop(self):
+        if not self._saved or not self._ax_trusted():
+            return
+        for pid, idx, ax_win in self._iter_wins():
+            s = self._saved.get((pid, idx))
+            if s:
+                self._set_frame(ax_win, s["pos"][0], s["pos"][1], s["size"][0], s["size"][1])
+        self._saved.clear()
+
+    def _ax_trusted(self):
+        return bool(_AS.AXIsProcessTrustedWithOptions(None))
+
+    def _prompt_permission(self):
+        def _show():
+            alert = AppKit.NSAlert.alloc().init()
+            alert.setMessageText_("Accessibility Permission Required")
+            alert.setInformativeText_(
+                "My Tasks needs Accessibility access to resize other windows "
+                "when the panel opens.\n\n"
+                "Open System Settings → Privacy & Security → Accessibility "
+                "and enable python3 (or My Tasks)."
+            )
+            alert.addButtonWithTitle_("Open System Settings")
+            alert.addButtonWithTitle_("Not Now")
+            if alert.runModal() == AppKit.NSAlertFirstButtonReturn:
+                AppKit.NSWorkspace.sharedWorkspace().openURL_(
+                    AppKit.NSURL.URLWithString_(
+                        "x-apple.systempreferences:"
+                        "com.apple.preference.security?Privacy_Accessibility"
+                    )
+                )
+        AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
+
+    def _iter_wins(self):
+        our_pid      = os.getpid()
+        sf           = AppKit.NSScreen.mainScreen().frame()
+        scr_x, scr_w = sf.origin.x, sf.size.width
+        ws           = AppKit.NSWorkspace.sharedWorkspace()
+        for app in ws.runningApplications():
+            pid = app.processIdentifier()
+            if pid == our_pid:
+                continue
+            if app.activationPolicy() != AppKit.NSApplicationActivationPolicyRegular:
+                continue
+            ax_app = _AS.AXUIElementCreateApplication(pid)
+            if not ax_app:
+                continue
+            cf_wins  = self._cfstr("AXWindows")
+            wins_ref = ctypes.c_void_p(0)
+            err = _AS.AXUIElementCopyAttributeValue(ax_app, cf_wins, ctypes.byref(wins_ref))
+            _CF.CFRelease(cf_wins)
+            _CF.CFRelease(ax_app)
+            if err != 0 or not wins_ref:
+                continue
+            count = _CF.CFArrayGetCount(wins_ref)
+            for i in range(count):
+                ax_win = _CF.CFArrayGetValueAtIndex(wins_ref, i)
+                if not ax_win:
+                    continue
+                if self._ax_bool(ax_win, "AXMinimized"):
+                    continue
+                if self._ax_bool(ax_win, "AXFullScreen"):
+                    continue
+                frame = self._get_frame(ax_win)
+                if frame is None:
+                    continue
+                if not (scr_x <= frame[0] < scr_x + scr_w):
+                    continue
+                yield pid, i, ax_win
+            _CF.CFRelease(wins_ref)
+
+    def _get_frame(self, ax_win):
+        pos  = self._ax_point(ax_win, "AXPosition")
+        size = self._ax_size(ax_win, "AXSize")
+        if pos is None or size is None:
+            return None
+        return (pos[0], pos[1], size[0], size[1])
+
+    def _set_frame(self, ax_win, x, y, w, h):
+        self._set_ax_point(ax_win, "AXPosition", x, y)
+        self._set_ax_size(ax_win,  "AXSize",     w, h)
+
+    def _ax_point(self, el, attr):
+        val = self._ax_get(el, attr)
+        if not val:
+            return None
+        pt = _CGPoint()
+        ok = _AS.AXValueGetValue(val, _kAXValueCGPointType, ctypes.byref(pt))
+        _CF.CFRelease(val)
+        return (pt.x, pt.y) if ok else None
+
+    def _ax_size(self, el, attr):
+        val = self._ax_get(el, attr)
+        if not val:
+            return None
+        sz = _CGSize()
+        ok = _AS.AXValueGetValue(val, _kAXValueCGSizeType, ctypes.byref(sz))
+        _CF.CFRelease(val)
+        return (sz.width, sz.height) if ok else None
+
+    def _ax_bool(self, el, attr):
+        val = self._ax_get(el, attr)
+        if not val:
+            return False
+        result = _CF.CFBooleanGetValue(val)
+        _CF.CFRelease(val)
+        return bool(result)
+
+    def _ax_get(self, el, attr):
+        cf_attr = self._cfstr(attr)
+        out     = ctypes.c_void_p(0)
+        err     = _AS.AXUIElementCopyAttributeValue(el, cf_attr, ctypes.byref(out))
+        _CF.CFRelease(cf_attr)
+        return out if err == 0 and out else None
+
+    def _set_ax_point(self, el, attr, x, y):
+        pt  = _CGPoint(x=x, y=y)
+        val = _AS.AXValueCreate(_kAXValueCGPointType, ctypes.byref(pt))
+        if not val: return
+        cf  = self._cfstr(attr)
+        _AS.AXUIElementSetAttributeValue(el, cf, val)
+        _CF.CFRelease(cf)
+        _CF.CFRelease(val)
+
+    def _set_ax_size(self, el, attr, w, h):
+        sz  = _CGSize(width=w, height=h)
+        val = _AS.AXValueCreate(_kAXValueCGSizeType, ctypes.byref(sz))
+        if not val: return
+        cf  = self._cfstr(attr)
+        _AS.AXUIElementSetAttributeValue(el, cf, val)
+        _CF.CFRelease(cf)
+        _CF.CFRelease(val)
+
+    def _cfstr(self, s):
+        return _CF.CFStringCreateWithCString(
+            None, s.encode("utf-8"), _kCFStringEncodingUTF8)
+
+
 # ── Main app delegate ─────────────────────────────────────────────────────────
 class KeyablePanel(AppKit.NSPanel):
     """Borderless panel that becomes key on click so Cmd+C/V/X reach the WKWebView."""
@@ -2317,12 +2531,13 @@ class TodoBarApp(AppKit.NSObject):
     def init(self):
         self = objc.super(TodoBarApp, self).init()
         if self is None: return None
-        self.data        = load_data()
-        self.status_item = None
-        self.panel       = None
-        self.webview     = None
-        self._handler    = None
-        self._sync_timer = None
+        self.data            = load_data()
+        self.status_item     = None
+        self.panel           = None
+        self.webview         = None
+        self._handler        = None
+        self._sync_timer     = None
+        self._window_manager = WindowManager()
         return self
 
     def run(self):
@@ -2451,7 +2666,11 @@ class TodoBarApp(AppKit.NSObject):
     def togglePanel_(self, sender):
         if self.panel.isVisible():
             self.panel.orderOut_(None)
+            threading.Thread(target=self._window_manager.pop, daemon=True).start()
         else:
+            threading.Thread(
+                target=self._window_manager.push, args=(PANEL_WIDTH,), daemon=True
+            ).start()
             self.panel.makeKeyAndOrderFront_(None)
             AppKit.NSApp.activateIgnoringOtherApps_(True)
 
