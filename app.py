@@ -2360,9 +2360,12 @@ class WindowManager:
     """Resize all visible main-screen windows to clear room for the panel, then restore."""
 
     def __init__(self):
-        self._saved = {}   # (pid, win_idx) → {"pos": (x,y), "size": (w,h)}
+        self._saved = {}               # (pid, win_idx) → {"pos": (x,y), "size": (w,h)}
+        self._current_screen_frame = None  # screen_frame tuple last pushed to
 
     def push(self, panel_width, screen_frame):
+        if self._current_screen_frame == screen_frame and self._saved:
+            return  # already adjusted for this screen
         if not self._ax_trusted():
             self._prompt_permission()
             return
@@ -2397,8 +2400,17 @@ class WindowManager:
             done.set()
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_apply)
         done.wait(timeout=5)
+        self._current_screen_frame = screen_frame
+
+    def update_screen(self, panel_width, screen_frame):
+        """Called after panel snaps to a new screen — pop old, push new."""
+        if self._current_screen_frame == screen_frame and self._saved:
+            return
+        self.pop()
+        self.push(panel_width, screen_frame)
 
     def pop(self):
+        self._current_screen_frame = None
         if not self._saved or not self._ax_trusted():
             return
         updates = []
@@ -2676,6 +2688,13 @@ class TodoBarApp(AppKit.NSObject):
                     x  = int(vf.origin.x + vf.size.width) - w
                     y  = int(vf.origin.y)
                     panel.setFrame_display_(NSMakeRect(x, y, w, h), True)
+                    sf = screen.frame()
+                    screen_frame = (sf.origin.x, sf.origin.y, sf.size.width, sf.size.height)
+                    threading.Thread(
+                        target=self._window_manager.update_screen,
+                        args=(PANEL_WIDTH, screen_frame),
+                        daemon=True,
+                    ).start()
             except Exception:
                 pass
             return event
@@ -2735,14 +2754,9 @@ class TodoBarApp(AppKit.NSObject):
         btn.setAction_("togglePanel:")
 
     def panelDidChangeScreen_(self, notif):
-        if not self.panel.isVisible():
-            return
-        scr = (self.panel.screen() or AppKit.NSScreen.mainScreen()).frame()
-        screen_frame = (scr.origin.x, scr.origin.y, scr.size.width, scr.size.height)
-        def _do():
-            self._window_manager.pop()
-            self._window_manager.push(PANEL_WIDTH, screen_frame)
-        threading.Thread(target=_do, daemon=True).start()
+        # on_up handles the definitive post-snap update; this fires mid-drag
+        # so we intentionally leave it as a no-op to avoid a premature resize.
+        pass
 
     def togglePanel_(self, sender):
         if self.panel.isVisible():
