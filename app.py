@@ -2359,14 +2359,17 @@ class WindowManager:
     def __init__(self):
         self._saved = {}   # (pid, win_idx) → {"pos": (x,y), "size": (w,h)}
 
-    def push(self, panel_width):
+    def push(self, panel_width, screen_frame):
         if not self._ax_trusted():
             self._prompt_permission()
             return
-        sf          = AppKit.NSScreen.mainScreen().frame()
-        right_limit = sf.size.width - panel_width
+        scr_x       = screen_frame[0]
+        scr_w       = screen_frame[2]
+        right_limit = scr_x + scr_w - panel_width
         self._saved.clear()
-        for pid, idx, ax_win in self._iter_wins():
+        # Collect all new frames before touching anything
+        updates = []
+        for pid, idx, ax_win in self._iter_wins(screen_frame):
             frame = self._get_frame(ax_win)
             if frame is None:
                 continue
@@ -2374,16 +2377,30 @@ class WindowManager:
             self._saved[(pid, idx)] = {"pos": (x, y), "size": (w, h)}
             if x + w > right_limit:
                 new_w = max(right_limit - x, 100)
+                updates.append((ax_win, x, y, new_w, h))
+        # Apply all resizes atomically to avoid visible stagger
+        AppKit.NSDisableScreenUpdates()
+        try:
+            for ax_win, x, y, new_w, h in updates:
                 self._set_frame(ax_win, x, y, new_w, h)
+        finally:
+            AppKit.NSEnableScreenUpdates()
 
     def pop(self):
         if not self._saved or not self._ax_trusted():
             return
+        updates = []
         for pid, idx, ax_win in self._iter_wins():
             s = self._saved.get((pid, idx))
             if s:
-                self._set_frame(ax_win, s["pos"][0], s["pos"][1], s["size"][0], s["size"][1])
+                updates.append((ax_win, s["pos"][0], s["pos"][1], s["size"][0], s["size"][1]))
         self._saved.clear()
+        AppKit.NSDisableScreenUpdates()
+        try:
+            for ax_win, x, y, w, h in updates:
+                self._set_frame(ax_win, x, y, w, h)
+        finally:
+            AppKit.NSEnableScreenUpdates()
 
     def _ax_trusted(self):
         return bool(_AS.AXIsProcessTrustedWithOptions(None))
@@ -2432,10 +2449,13 @@ class WindowManager:
                 os.execv(full_app, [full_app, script])
         AppKit.NSOperationQueue.mainQueue().addOperationWithBlock_(_show)
 
-    def _iter_wins(self):
-        our_pid      = os.getpid()
-        sf           = AppKit.NSScreen.mainScreen().frame()
-        scr_x, scr_w = sf.origin.x, sf.size.width
+    def _iter_wins(self, screen_frame=None):
+        our_pid = os.getpid()
+        if screen_frame:
+            scr_x, scr_w = screen_frame[0], screen_frame[2]
+        else:
+            sf = AppKit.NSScreen.mainScreen().frame()
+            scr_x, scr_w = sf.origin.x, sf.size.width
         ws           = AppKit.NSWorkspace.sharedWorkspace()
         for app in ws.runningApplications():
             pid = app.processIdentifier()
@@ -2697,8 +2717,15 @@ class TodoBarApp(AppKit.NSObject):
             self.panel.orderOut_(None)
             threading.Thread(target=self._window_manager.pop, daemon=True).start()
         else:
+            # Capture the panel's current screen on the main thread before
+            # handing off to the background thread — panel.screen() is not
+            # thread-safe so we read it here as a plain tuple.
+            scr = (self.panel.screen() or AppKit.NSScreen.mainScreen()).frame()
+            screen_frame = (scr.origin.x, scr.origin.y, scr.size.width, scr.size.height)
             threading.Thread(
-                target=self._window_manager.push, args=(PANEL_WIDTH,), daemon=True
+                target=self._window_manager.push,
+                args=(PANEL_WIDTH, screen_frame),
+                daemon=True,
             ).start()
             self.panel.makeKeyAndOrderFront_(None)
             AppKit.NSApp.activateIgnoringOtherApps_(True)
