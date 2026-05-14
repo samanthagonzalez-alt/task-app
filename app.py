@@ -58,6 +58,9 @@ _AS.AXValueGetValue.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
 _CF.CFRelease.restype  = None
 _CF.CFRelease.argtypes = [ctypes.c_void_p]
 
+_CF.CFRetain.restype  = ctypes.c_void_p
+_CF.CFRetain.argtypes = [ctypes.c_void_p]
+
 _CF.CFStringCreateWithCString.restype  = ctypes.c_void_p
 _CF.CFStringCreateWithCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
 
@@ -2367,7 +2370,9 @@ class WindowManager:
         scr_w       = screen_frame[2]
         right_limit = scr_x + scr_w - panel_width
         self._saved.clear()
-        # Collect all new frames before touching anything
+        # Collect all new frames before touching anything.
+        # CFRetain each ax_win because wins_ref is released inside _iter_wins
+        # before we apply the batch — without retain the pointers go stale.
         updates = []
         for pid, idx, ax_win in self._iter_wins(screen_frame):
             frame = self._get_frame(ax_win)
@@ -2377,15 +2382,16 @@ class WindowManager:
             self._saved[(pid, idx)] = {"pos": (x, y), "size": (w, h)}
             if x + w > right_limit:
                 new_w = max(right_limit - x, 100)
+                _CF.CFRetain(ax_win)
                 updates.append((ax_win, x, y, new_w, h))
-        # Apply all resizes atomically — NSDisable/EnableScreenUpdates must
-        # run on the main thread, so we block here until it's done.
+        # Apply all resizes atomically on the main thread.
         done = threading.Event()
         def _apply():
             AppKit.NSDisableScreenUpdates()
             try:
                 for ax_win, x, y, new_w, h in updates:
                     self._set_frame(ax_win, x, y, new_w, h)
+                    _CF.CFRelease(ax_win)
             finally:
                 AppKit.NSEnableScreenUpdates()
             done.set()
@@ -2399,6 +2405,7 @@ class WindowManager:
         for pid, idx, ax_win in self._iter_wins():
             s = self._saved.get((pid, idx))
             if s:
+                _CF.CFRetain(ax_win)
                 updates.append((ax_win, s["pos"][0], s["pos"][1], s["size"][0], s["size"][1]))
         self._saved.clear()
         done = threading.Event()
@@ -2407,6 +2414,7 @@ class WindowManager:
             try:
                 for ax_win, x, y, w, h in updates:
                     self._set_frame(ax_win, x, y, w, h)
+                    _CF.CFRelease(ax_win)
             finally:
                 AppKit.NSEnableScreenUpdates()
             done.set()
