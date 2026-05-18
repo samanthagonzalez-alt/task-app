@@ -89,6 +89,16 @@ class _CGPoint(ctypes.Structure):
 class _CGSize(ctypes.Structure):
     _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
 
+_LOG_FILE = Path.home() / "todo-bar" / "launch.log"
+
+def _log(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    try:
+        with open(_LOG_FILE, "a") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        pass
+
 # ── Config ────────────────────────────────────────────────────────────────────
 DATA_FILE         = Path.home() / ".todo-bar" / "tasks.json"
 PID_FILE          = Path.home() / ".todo-bar" / "app.pid"
@@ -211,19 +221,50 @@ def run_drive_oauth():
     }
     TOKEN_PATH.write_text(json.dumps(updated, indent=2))
 
-# ── Gmail sync ────────────────────────────────────────────────────────────────
-SAM_PATTERNS = [
-    r"^Samantha Gonzalez will\s+",
-    r"^Sam will\s+",
-    r"^\[Samantha[^\]]*\]\s*",
-    r"^\[Sam\]\s*",
-    r"^Samantha Gonzalez\s*",
-    r"^Sam\s+",
-]
+# ── Settings helpers ──────────────────────────────────────────────────────────
+DEFAULT_ALIASES    = ["Samantha", "Sam", "Samantha Gonzalez"]
+DEFAULT_SYNC_MINS  = 30
 
-def clean_task_text(line):
+def get_settings(data):
+    s = data.get("_settings") or {}
+    return {
+        "nameAliases":    s.get("nameAliases") or list(DEFAULT_ALIASES),
+        "syncIntervalMin": s.get("syncIntervalMin") or DEFAULT_SYNC_MINS,
+    }
+
+def _alias_re(aliases):
+    """Return (strip_patterns, item_re) built from the user's name aliases."""
+    if not aliases:
+        aliases = DEFAULT_ALIASES
+    # Sort longest first so greedy match strips the most specific form
+    names = sorted(set(aliases), key=len, reverse=True)
+    escaped = [re.escape(n) for n in names]
+    alt = "|".join(escaped)
+    strip_pats = [
+        rf"^(?:{alt})\s+will\s+",
+        rf"^\[(?:{alt})[^\]]*\]\s*",
+        rf"^(?:{alt})\s*[:–\-]\s*",
+        rf"^(?:{alt})\s+(?:to|will)\s+",
+        rf"^(?:{alt})\s+",
+    ]
+    item_re = re.compile(
+        rf'^[-•*\s]*(?:'
+        rf'(?:{alt})\s*[:–\-]\s*|'
+        rf'(?:{alt})\s+(?:to|will)\s+'
+        rf')',
+        re.I,
+    )
+    primary_re = re.compile(
+        rf'^-?\s*(?:\[(?:{alt})[^\]]*\]|(?:{alt})\b)',
+        re.I,
+    )
+    return strip_pats, item_re, primary_re
+
+# ── Gmail sync ────────────────────────────────────────────────────────────────
+
+def clean_task_text(line, strip_pats=None):
     text = line.strip().lstrip("-•* ")
-    for pat in SAM_PATTERNS:
+    for pat in (strip_pats or []):
         new = re.sub(pat, "", text, flags=re.IGNORECASE).strip()
         if new != text:
             text = new
@@ -252,7 +293,7 @@ def decode_body(payload):
             return text
     return ""
 
-def extract_sam_tasks(body, message_id, subject):
+def extract_sam_tasks(body, message_id, subject, aliases=None):
     tasks = []
     m = re.search(r"Suggested next steps(.*?)(?=\n\n\n|Meeting records|$)", body,
                   re.IGNORECASE | re.DOTALL)
@@ -260,8 +301,8 @@ def extract_sam_tasks(body, message_id, subject):
         return tasks
     section = m.group(1)
 
-    # Email bodies soft-wrap long lines. Rejoin them by splitting on blank lines
-    # (each paragraph = one action item) then collapsing internal newlines.
+    strip_pats, _, primary_re = _alias_re(aliases)
+
     raw_items = re.split(r'\n\s*\n', section)
     items = []
     for block in raw_items:
@@ -272,14 +313,9 @@ def extract_sam_tasks(body, message_id, subject):
     for item in items:
         if re.match(r"^(Suggested next steps|Meeting records)", item, re.I):
             continue
-        # Only include tasks where Sam is the PRIMARY assignee (starts the item),
-        # not merely mentioned as a collaborator mid-sentence.
-        if not re.search(
-            r"^-?\s*(\[Samantha|\[Sam\]|Sam\b|Samantha Gonzalez|\[[^\]]*Samantha)",
-            item.strip(), re.I
-        ):
+        if not primary_re.search(item.strip()):
             continue
-        text = clean_task_text(item)
+        text = clean_task_text(item, strip_pats)
         if len(text) < 5:
             continue
         h         = hashlib.md5(text.encode()).hexdigest()[:8]
@@ -290,7 +326,7 @@ def extract_sam_tasks(body, message_id, subject):
         ))
     return tasks
 
-def extract_docs_tasks(body, message_id, subject):
+def extract_docs_tasks(body, message_id, subject, aliases=None):
     """Extract tasks from Google Docs/Sheets assignment and @mention notification emails."""
     tasks = []
 
@@ -332,6 +368,8 @@ def extract_docs_tasks(body, message_id, subject):
             source=doc_name, source_id=source_id,
         ))
 
+    strip_pats, _, _ = _alias_re(aliases)
+
     if is_assignment:
         # Pipe lines = task text
         for line in lines:
@@ -341,8 +379,7 @@ def extract_docs_tasks(body, message_id, subject):
             text = stripped.lstrip("| ").strip()
             if re.match(r'^[A-Z][a-z]+ \d{1,2},?\s*\d{4}$', text):
                 continue
-            text = re.sub(r'^Samantha\s*Gonzalez\s*', '', text, flags=re.IGNORECASE).strip()
-            text = re.sub(r'^Sam\b\s*', '', text, flags=re.IGNORECASE).strip()
+            text = clean_task_text(text, strip_pats)
             add_task(text)
 
     else:
@@ -427,14 +464,13 @@ def extract_docs_tasks(body, message_id, subject):
     return tasks
 
 
-def run_gmail_sync(last_sync=None):
+def run_gmail_sync(last_sync=None, aliases=None):
     try:
         from googleapiclient.discovery import build
 
         creds = _load_creds()
         gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
 
-        # Only fetch emails newer than last sync (default 30d on first run)
         newer = "newer_than:30d"
         if last_sync:
             try:
@@ -455,7 +491,7 @@ def run_gmail_sync(last_sync=None):
             headers = {h["name"]: h["value"] for h in full["payload"].get("headers", [])}
             subject = headers.get("Subject", "")
             body    = decode_body(full["payload"])
-            all_tasks.extend(extract_sam_tasks(body, msg["id"], subject))
+            all_tasks.extend(extract_sam_tasks(body, msg["id"], subject, aliases=aliases))
 
         # 2. Google Docs / Sheets task assignment notifications
         result2 = gmail.users().messages().list(
@@ -466,7 +502,7 @@ def run_gmail_sync(last_sync=None):
             headers = {h["name"]: h["value"] for h in full["payload"].get("headers", [])}
             subject = headers.get("Subject", "")
             body    = decode_body(full["payload"])
-            all_tasks.extend(extract_docs_tasks(body, msg["id"], subject))
+            all_tasks.extend(extract_docs_tasks(body, msg["id"], subject, aliases=aliases))
 
         return all_tasks, None
     except Exception as e:
@@ -618,21 +654,22 @@ def _parse_section_date(date_str):
             pass
     return None
 
-def extract_doc_sam_tasks(text, doc_name, doc_id, days_back=60):
-    """Return Sam's action items listed under 'Action Items' in a meeting notes doc."""
+def extract_doc_sam_tasks(text, doc_name, doc_id, days_back=60, aliases=None):
+    """Return the user's action items listed under 'Action Items' in a meeting notes doc."""
     from datetime import timedelta
     tasks    = []
     seen     = set()
     cutoff   = datetime.now(timezone.utc) - timedelta(days=days_back)
-    in_range = True   # content before first date header is always included
+    in_range = True
     in_action_items = False
+
+    _, item_re, _ = _alias_re(aliases)
 
     for line in text.splitlines():
         s = line.strip()
         if not s:
             continue
 
-        # Date-based section boundary (e.g. "Apr 6, 2026 | Meeting Title")
         dm = _SECTION_DATE_RE.match(s)
         if dm:
             parsed = _parse_section_date(dm.group(1))
@@ -644,12 +681,10 @@ def extract_doc_sam_tasks(text, doc_name, doc_id, days_back=60):
         if not in_range:
             continue
 
-        # Entering an "Action Items" block
         if _ACTION_ITEMS_HDR.match(s):
             in_action_items = True
             continue
 
-        # A new section header ends the Action Items block
         if in_action_items and _SECTION_HDR.match(s):
             in_action_items = False
             continue
@@ -657,8 +692,7 @@ def extract_doc_sam_tasks(text, doc_name, doc_id, days_back=60):
         if not in_action_items:
             continue
 
-        # Inside Action Items — match lines assigned to Sam
-        ms = _SAM_ITEM.match(s)
+        ms = item_re.match(s)
         if ms:
             task_text = s[ms.end():].strip().rstrip(".")
             if task_text and len(task_text) >= 5:
@@ -672,7 +706,7 @@ def extract_doc_sam_tasks(text, doc_name, doc_id, days_back=60):
 
     return tasks
 
-def run_docs_sync(known_docs_cache=None, last_sync=None):
+def run_docs_sync(known_docs_cache=None, last_sync=None, aliases=None):
     """Find meeting notes docs via ICS attachments and extract Sam's action items."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     try:
@@ -713,7 +747,7 @@ def run_docs_sync(known_docs_cache=None, last_sync=None):
         def _fetch_one(item):
             doc_id, doc_name = item
             text  = _fetch_doc_text(doc_id, token)
-            tasks = extract_doc_sam_tasks(text, doc_name, doc_id)
+            tasks = extract_doc_sam_tasks(text, doc_name, doc_id, aliases=aliases)
             print(f"  '{doc_name}' → {len(tasks)} task(s)", flush=True)
             return tasks
 
@@ -753,9 +787,20 @@ def format_sync(iso):
 
 def render_html(data, new_task_count=0):
     import json as _json
-    tasks      = data["tasks"]
-    sync_lbl   = _e(format_sync(data.get("lastSync")))
-    tasks_json = _json.dumps(tasks)
+    tasks         = data["tasks"]
+    sync_lbl      = _e(format_sync(data.get("lastSync")))
+    tasks_json    = _json.dumps(tasks)
+    settings      = get_settings(data)
+    aliases_json  = _json.dumps(settings["nameAliases"])
+    sync_mins     = settings["syncIntervalMin"]
+    first_run     = not settings["nameAliases"]
+    try:
+        creds_raw    = json.loads(TOKEN_PATH.read_text()) if TOKEN_PATH.exists() else {}
+        google_email = creds_raw.get("email") or ""
+        google_connected = bool(creds_raw.get("access_token") or creds_raw.get("refresh_token"))
+    except Exception:
+        google_email = ""
+        google_connected = False
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -880,6 +925,91 @@ header h1 {{ font-size: 15px; font-weight: 700; color: var(--navy); letter-spaci
   border-left: 1px solid var(--border);
 }}
 .search-icon-btn.active {{ color: var(--navy); }}
+.settings-icon-btn {{
+  flex: 0 0 auto; padding: 9px 14px; position: relative;
+  border-left: 1px solid var(--border); margin-left: auto;
+}}
+.settings-icon-btn.active {{ color: var(--navy); }}
+/* Settings panel */
+.settings-panel {{
+  display: none; flex-direction: column; flex: 1; overflow-y: auto;
+  padding: 20px 16px; background: var(--bg); gap: 0;
+}}
+.settings-panel.open {{ display: flex; }}
+.settings-section {{
+  background: var(--white); border-radius: 10px;
+  border: 1px solid var(--border); margin-bottom: 14px; overflow: hidden;
+}}
+.settings-section-title {{
+  font-size: 10px; font-weight: 700; letter-spacing: .06em;
+  color: var(--text2); text-transform: uppercase;
+  padding: 10px 14px 6px; border-bottom: 1px solid var(--border);
+}}
+.settings-row {{
+  padding: 12px 14px; display: flex; align-items: center;
+  gap: 10px; border-bottom: 1px solid var(--border);
+}}
+.settings-row:last-child {{ border-bottom: none; }}
+.settings-row-label {{
+  font-size: 12px; color: var(--text1); flex: 1;
+}}
+.settings-row-sub {{
+  font-size: 11px; color: var(--text2); margin-top: 2px;
+}}
+.alias-chips {{
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px;
+}}
+.alias-chip {{
+  display: inline-flex; align-items: center; gap: 5px;
+  background: #EEF0F8; border-radius: 20px;
+  padding: 4px 10px 4px 12px; font-size: 12px; color: var(--navy);
+}}
+.alias-chip-remove {{
+  background: none; border: none; cursor: pointer; padding: 0;
+  color: var(--text2); font-size: 13px; line-height: 1;
+  display: flex; align-items: center;
+}}
+.alias-chip-remove:hover {{ color: var(--pink); }}
+.alias-add-row {{
+  display: flex; gap: 8px; padding: 8px 14px 12px; align-items: center;
+}}
+.alias-input {{
+  flex: 1; border: 1.5px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: 12px; font-family: inherit;
+  outline: none; background: var(--bg);
+}}
+.alias-input:focus {{ border-color: var(--navy); background: var(--white); }}
+.alias-add-btn {{
+  background: var(--navy); color: #fff; border: none; border-radius: 6px;
+  padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}}
+.alias-add-btn:hover {{ background: #2e3a62; }}
+.google-status-dot {{
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--green);
+}}
+.google-status-dot.disconnected {{ background: var(--pink); }}
+.settings-freq-opts {{
+  display: flex; gap: 8px; padding: 10px 14px 12px;
+}}
+.freq-opt {{
+  flex: 1; border: 1.5px solid var(--border); border-radius: 6px;
+  padding: 6px 4px; font-size: 12px; text-align: center; cursor: pointer;
+  background: var(--bg); color: var(--text1);
+}}
+.freq-opt.sel {{
+  border-color: var(--navy); background: var(--navy); color: #fff; font-weight: 600;
+}}
+.settings-save-row {{
+  padding: 4px 0 8px;
+}}
+.settings-save-btn {{
+  width: 100%; padding: 10px; background: var(--navy); color: #fff;
+  border: none; border-radius: 8px; font-size: 13px; font-weight: 600;
+  cursor: pointer; font-family: inherit;
+}}
+.settings-save-btn:hover {{ background: #2e3a62; }}
+.settings-save-btn.saved {{ background: var(--green); }}
 /* Search bar */
 .search-bar {{
   display: none; align-items: center; gap: 8px;
@@ -1254,6 +1384,9 @@ footer {{
   <button class="tab search-icon-btn" id="search-toggle-btn" onclick="toggleSearch()" title="Search">
     <svg width="13" height="13" viewBox="0 0 13 13" fill="none" style="display:block;pointer-events:none"><circle cx="5.5" cy="5.5" r="4" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 8.5L12 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
   </button>
+  <button class="tab settings-icon-btn" id="settings-toggle-btn" onclick="toggleSettings()" title="Settings">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" style="display:block;pointer-events:none"><circle cx="7" cy="7" r="2" stroke="currentColor" stroke-width="1.4"/><path d="M7 1v1.2M7 11.8V13M1 7h1.2M11.8 7H13M2.75 2.75l.85.85M10.4 10.4l.85.85M2.75 11.25l.85-.85M10.4 3.6l.85-.85" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+  </button>
 </div>
 
 <div class="search-bar" id="search-bar">
@@ -1261,6 +1394,48 @@ footer {{
     oninput="onSearchInput(this.value)">
   <span class="search-count" id="search-count"></span>
   <button class="search-clear" id="search-clear-btn" onclick="clearSearch()" title="Clear search" style="display:none">&#x2715;</button>
+</div>
+
+<div class="settings-panel" id="settings-panel">
+  <div class="settings-section">
+    <div class="settings-section-title">Your Name in Notes</div>
+    <div style="padding:8px 14px 4px;font-size:12px;color:var(--text2);">
+      Add every variation of your name that appears next to action items in meeting notes.
+    </div>
+    <div class="alias-chips" id="alias-chips"></div>
+    <div class="alias-add-row">
+      <input class="alias-input" id="alias-input" type="text" placeholder="e.g. Jordan"
+        onkeydown="if(event.key==='Enter')addAlias()">
+      <button class="alias-add-btn" onclick="addAlias()">Add</button>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">Google Workspace</div>
+    <div class="settings-row">
+      <div class="google-status-dot{' disconnected' if not google_connected else ''}"></div>
+      <div>
+        <div class="settings-row-label">{'Connected' if google_connected else 'Not connected'}</div>
+        {f'<div class="settings-row-sub">{_e(google_email)}</div>' if google_email else ''}
+      </div>
+      <button onclick="reconnectGoogle()" style="background:none;border:1.5px solid var(--border);border-radius:6px;padding:5px 10px;font-size:11px;cursor:pointer;color:var(--text1);white-space:nowrap;">
+        Reconnect
+      </button>
+    </div>
+  </div>
+
+  <div class="settings-section">
+    <div class="settings-section-title">Sync Frequency</div>
+    <div class="settings-freq-opts" id="freq-opts">
+      <div class="freq-opt{' sel' if sync_mins==15 else ''}" data-mins="15" onclick="selectFreq(15)">15 min</div>
+      <div class="freq-opt{' sel' if sync_mins==30 else ''}" data-mins="30" onclick="selectFreq(30)">30 min</div>
+      <div class="freq-opt{' sel' if sync_mins==60 else ''}" data-mins="60" onclick="selectFreq(60)">60 min</div>
+    </div>
+  </div>
+
+  <div class="settings-save-row">
+    <button class="settings-save-btn" id="settings-save-btn" onclick="saveSettings()">Save Settings</button>
+  </div>
 </div>
 
 <div class="view-bar">
@@ -1731,6 +1906,82 @@ function clearSearch() {{
   if (countEl) countEl.textContent = '';
   applyFilters();
 }}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+var settingsAliases  = {aliases_json};
+var settingsFreqMins = {sync_mins};
+var settingsOpen     = false;
+
+function renderAliasChips() {{
+  var chips = document.getElementById('alias-chips');
+  while (chips.firstChild) chips.removeChild(chips.firstChild);
+  settingsAliases.forEach(function(a, i) {{
+    var chip = document.createElement('div');
+    chip.className = 'alias-chip';
+    var nameNode = document.createTextNode(a);
+    chip.appendChild(nameNode);
+    var btn = document.createElement('button');
+    btn.className = 'alias-chip-remove';
+    btn.title = 'Remove';
+    btn.textContent = '✕';
+    btn.setAttribute('data-idx', i);
+    btn.addEventListener('click', function() {{ removeAlias(parseInt(this.getAttribute('data-idx'))); }});
+    chip.appendChild(btn);
+    chips.appendChild(chip);
+  }});
+}}
+function addAlias() {{
+  var inp = document.getElementById('alias-input');
+  var val = inp.value.trim();
+  if (!val) return;
+  if (settingsAliases.indexOf(val) === -1) {{
+    settingsAliases.push(val);
+    renderAliasChips();
+  }}
+  inp.value = '';
+  inp.focus();
+}}
+function removeAlias(i) {{
+  settingsAliases.splice(i, 1);
+  renderAliasChips();
+}}
+function selectFreq(mins) {{
+  settingsFreqMins = mins;
+  document.querySelectorAll('.freq-opt').forEach(function(el) {{
+    el.classList.toggle('sel', parseInt(el.getAttribute('data-mins')) === mins);
+  }});
+}}
+function toggleSettings() {{
+  settingsOpen = !settingsOpen;
+  var panel = document.getElementById('settings-panel');
+  var btn   = document.getElementById('settings-toggle-btn');
+  var vbar  = document.querySelector('.view-bar');
+  var list  = document.getElementById('task-list');
+  panel.classList.toggle('open', settingsOpen);
+  btn.classList.toggle('active', settingsOpen);
+  if (vbar)  vbar.style.display  = settingsOpen ? 'none' : '';
+  if (list)  list.style.display  = settingsOpen ? 'none' : '';
+  if (settingsOpen) renderAliasChips();
+}}
+function openSettings() {{
+  if (!settingsOpen) toggleSettings();
+}}
+function reconnectGoogle() {{
+  window.webkit.messageHandlers.bridge.postMessage({{action:'reconnect-google',id:null,extra:null}});
+}}
+function saveSettings() {{
+  var btn = document.getElementById('settings-save-btn');
+  window.webkit.messageHandlers.bridge.postMessage({{
+    action: 'save-settings', id: null,
+    extra: {{ nameAliases: settingsAliases, syncIntervalMin: settingsFreqMins }}
+  }});
+  btn.textContent = 'Saved!';
+  btn.classList.add('saved');
+  setTimeout(function() {{
+    btn.textContent = 'Save Settings';
+    btn.classList.remove('saved');
+  }}, 1500);
+}}
 document.addEventListener('click', function(e) {{
   if (!e.target.closest('.cs-wrap')) {{
     document.querySelectorAll('.cs-list').forEach(function(el) {{ el.classList.remove('open'); }});
@@ -2182,6 +2433,11 @@ document.getElementById('dp-note-input').addEventListener('keydown', function(e)
 buildProjectFilter();
 applyFilters();
 
+// First-run: open settings if no aliases configured
+if (settingsAliases.length === 0) {{
+  openSettings();
+}}
+
 (function() {{
   var n = {new_task_count};
   if (n > 0) {{
@@ -2350,6 +2606,26 @@ if HAS_WEBKIT:
             elif action == "sync":
                 threading.Thread(target=app._do_sync, daemon=True).start()
 
+            elif action == "save-settings" and extra:
+                aliases  = extra.get("nameAliases")
+                freq     = extra.get("syncIntervalMin")
+                if "_settings" not in app.data:
+                    app.data["_settings"] = {}
+                if isinstance(aliases, list):
+                    app.data["_settings"]["nameAliases"] = [
+                        str(a).strip() for a in aliases if str(a).strip()
+                    ]
+                if isinstance(freq, (int, float)) and int(freq) in (15, 30, 60):
+                    app.data["_settings"]["syncIntervalMin"] = int(freq)
+                    # Reschedule sync timer with new interval
+                    if app._sync_timer:
+                        app._sync_timer.cancel()
+                    app._schedule_sync()
+                save_data(app.data)
+
+            elif action == "reconnect-google":
+                threading.Thread(target=app._do_drive_auth, daemon=True).start()
+
             elif action == "clear_done":
                 app.data["tasks"] = [t for t in app.data["tasks"] if not t["done"]]
                 save_data(app.data)
@@ -2365,6 +2641,7 @@ class WindowManager:
 
     def push(self, panel_width, screen_frame):
         if self._current_screen_frame == screen_frame and self._saved:
+            _log(f"[WM] push skip — already on screen {screen_frame[0]:.0f},{screen_frame[1]:.0f}")
             return  # already adjusted for this screen
         if not self._ax_trusted():
             self._prompt_permission()
@@ -2373,9 +2650,6 @@ class WindowManager:
         scr_w       = screen_frame[2]
         right_limit = scr_x + scr_w - panel_width
         self._saved.clear()
-        # Collect all new frames before touching anything.
-        # CFRetain each ax_win because wins_ref is released inside _iter_wins
-        # before we apply the batch — without retain the pointers go stale.
         updates = []
         for pid, idx, ax_win in self._iter_wins(screen_frame):
             frame = self._get_frame(ax_win)
@@ -2387,7 +2661,8 @@ class WindowManager:
                 new_w = max(right_limit - x, 100)
                 _CF.CFRetain(ax_win)
                 updates.append((ax_win, x, y, new_w, h))
-        # Apply all resizes atomically on the main thread.
+                _log(f"[WM] push resize pid={pid} {x:.0f},{y:.0f} {w:.0f}x{h:.0f} → {new_w:.0f}x{h:.0f}")
+        _log(f"[WM] push screen=({scr_x:.0f},{screen_frame[1]:.0f},{scr_w:.0f}) right_limit={right_limit:.0f} found={len(self._saved)} resize={len(updates)}")
         done = threading.Event()
         def _apply():
             AppKit.NSDisableScreenUpdates()
@@ -2404,12 +2679,15 @@ class WindowManager:
 
     def update_screen(self, panel_width, screen_frame):
         """Called after panel snaps to a new screen — pop old, push new."""
+        _log(f"[WM] update_screen screen=({screen_frame[0]:.0f},{screen_frame[1]:.0f}) cur={self._current_screen_frame}")
         if self._current_screen_frame == screen_frame and self._saved:
+            _log("[WM] update_screen skip — same screen, already pushed")
             return
         self.pop()
         self.push(panel_width, screen_frame)
 
     def pop(self):
+        _log(f"[WM] pop saved={len(self._saved)}")
         self._current_screen_frame = None
         if not self._saved or not self._ax_trusted():
             return
@@ -2681,6 +2959,7 @@ class TodoBarApp(AppKit.NSObject):
             self._dragging = False
             try:
                 screen = panel.screen()
+                _log(f"[WM] on_up screen={screen}")
                 if screen:
                     vf = screen.visibleFrame()
                     w  = PANEL_WIDTH
@@ -2690,13 +2969,14 @@ class TodoBarApp(AppKit.NSObject):
                     panel.setFrame_display_(NSMakeRect(x, y, w, h), True)
                     sf = screen.frame()
                     screen_frame = (sf.origin.x, sf.origin.y, sf.size.width, sf.size.height)
+                    _log(f"[WM] on_up snapped to screen_frame={screen_frame}")
                     threading.Thread(
                         target=self._window_manager.update_screen,
                         args=(PANEL_WIDTH, screen_frame),
                         daemon=True,
                     ).start()
-            except Exception:
-                pass
+            except Exception as e:
+                _log(f"[WM] on_up exception: {e}")
             return event
 
         # NSEventMask values: LeftMouseDown=2, LeftMouseUp=4, LeftMouseDragged=64
@@ -2754,9 +3034,14 @@ class TodoBarApp(AppKit.NSObject):
         btn.setAction_("togglePanel:")
 
     def panelDidChangeScreen_(self, notif):
-        # on_up handles the definitive post-snap update; this fires mid-drag
-        # so we intentionally leave it as a no-op to avoid a premature resize.
-        pass
+        if not self.panel.isVisible():
+            return
+        scr = (self.panel.screen() or AppKit.NSScreen.mainScreen()).frame()
+        screen_frame = (scr.origin.x, scr.origin.y, scr.size.width, scr.size.height)
+        _log(f"[WM] panelDidChangeScreen screen=({screen_frame[0]:.0f},{screen_frame[1]:.0f})")
+        def _do():
+            self._window_manager.update_screen(PANEL_WIDTH, screen_frame)
+        threading.Thread(target=_do, daemon=True).start()
 
     def togglePanel_(self, sender):
         if self.panel.isVisible():
@@ -2865,18 +3150,18 @@ class TodoBarApp(AppKit.NSObject):
 
     # ── Gmail + Docs sync ─────────────────────────────────────────────────────
     def _do_sync(self):
-        # Reload from disk first so we work with the freshest data
-        self.data = load_data()
-        last_sync      = self.data.get("lastSync")
-        known_docs     = self.data.get("_known_docs") or None
+        self.data  = load_data()
+        last_sync  = self.data.get("lastSync")
+        known_docs = self.data.get("_known_docs") or None
+        aliases    = get_settings(self.data)["nameAliases"]
 
-        new_tasks, err = run_gmail_sync(last_sync=last_sync)
+        new_tasks, err = run_gmail_sync(last_sync=last_sync, aliases=aliases)
         if err:
             print(f"Gmail sync error: {err}", flush=True)
             new_tasks = []
 
         doc_tasks, doc_err, updated_docs = run_docs_sync(
-            known_docs_cache=known_docs, last_sync=last_sync
+            known_docs_cache=known_docs, last_sync=last_sync, aliases=aliases
         )
         if doc_err:
             print(f"Docs sync error: {doc_err}", flush=True)
