@@ -802,6 +802,14 @@ def render_html(data, new_task_count=0):
         google_email = ""
         google_connected = False
 
+    try:
+        slack_raw       = json.loads((Path.home() / ".todo-bar" / "slack_token.json").read_text()) if (Path.home() / ".todo-bar" / "slack_token.json").exists() else {}
+        slack_connected = bool(slack_raw.get("access_token"))
+        slack_user      = slack_raw.get("user", "")
+    except Exception:
+        slack_connected = False
+        slack_user      = ""
+
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <style>
@@ -1425,6 +1433,26 @@ footer {{
   </div>
 
   <div class="settings-section">
+    <div class="settings-section-title">Slack</div>
+    <div class="settings-row">
+      <div class="google-status-dot{' disconnected' if not slack_connected else ''}"></div>
+      <div>
+        <div class="settings-row-label">{'Connected' if slack_connected else 'Not connected'}</div>
+        {f'<div class="settings-row-sub">{_e(slack_user)}</div>' if slack_user else ''}
+      </div>
+    </div>
+    <div class="alias-add-row" style="flex-direction:column;align-items:stretch;gap:6px;">
+      <div style="font-size:11px;color:var(--text2);">Paste your Slack OAuth token to connect. It will be stored locally and never shared.</div>
+      <div style="display:flex;gap:8px;">
+        <input class="alias-input" id="slack-token-input" type="password"
+          placeholder="xoxp-..." autocomplete="off" autocorrect="off" spellcheck="false">
+        <button class="alias-add-btn" onclick="saveSlackToken()">Save</button>
+      </div>
+      <div id="slack-token-status" style="font-size:11px;color:var(--green);display:none;">Token saved and verified.</div>
+    </div>
+  </div>
+
+  <div class="settings-section">
     <div class="settings-section-title">Sync Frequency</div>
     <div class="settings-freq-opts" id="freq-opts">
       <div class="freq-opt{' sel' if sync_mins==15 else ''}" data-mins="15" onclick="selectFreq(15)">15 min</div>
@@ -1968,6 +1996,18 @@ function openSettings() {{
 }}
 function reconnectGoogle() {{
   window.webkit.messageHandlers.bridge.postMessage({{action:'reconnect-google',id:null,extra:null}});
+}}
+function saveSlackToken() {{
+  var inp = document.getElementById('slack-token-input');
+  var token = inp.value.trim();
+  if (!token) return;
+  window.webkit.messageHandlers.bridge.postMessage({{
+    action: 'save-slack-token', id: null, extra: {{ token: token }}
+  }});
+  inp.value = '';
+  var status = document.getElementById('slack-token-status');
+  status.style.display = '';
+  setTimeout(function() {{ status.style.display = 'none'; }}, 3000);
 }}
 function saveSettings() {{
   var btn = document.getElementById('settings-save-btn');
@@ -2625,6 +2665,14 @@ if HAS_WEBKIT:
 
             elif action == "reconnect-google":
                 threading.Thread(target=app._do_drive_auth, daemon=True).start()
+
+            elif action == "save-slack-token" and extra:
+                token = (extra.get("token") or "").strip()
+                if token:
+                    slack_path = Path.home() / ".todo-bar" / "slack_token.json"
+                    slack_path.parent.mkdir(parents=True, exist_ok=True)
+                    slack_path.write_text(json.dumps({"access_token": token}, indent=2))
+                    threading.Thread(target=app._do_sync, daemon=True).start()
 
             elif action == "clear_done":
                 app.data["tasks"] = [t for t in app.data["tasks"] if not t["done"]]
