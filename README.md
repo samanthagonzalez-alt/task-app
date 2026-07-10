@@ -80,6 +80,31 @@ python3 demo_data.py --reset  # full reset to the base demo task set
 - Demo tasks: `~/.todo-bar/demo_tasks.json`
 - App logs: `~/todo-bar/launch.log`
 
+## Fork & customize
+
+To clone this and run your own copy:
+
+1. **Clone the repo:**
+
+   ```bash
+   git clone https://github.com/samanthagonzalez-alt/task-app.git
+   cd task-app
+   ```
+
+2. **Install dependencies** — see [Requirements](#requirements) above.
+
+3. **Update the LaunchAgent plist** (if you plan to run at login) — `com.todobar.app.plist` has an absolute path baked in for the original author's machine. Edit the three `/Users/samantha.gonzalez/...` paths in it to match your own home directory and clone location, e.g.:
+
+   ```bash
+   sed -i '' "s|/Users/samantha.gonzalez/todo-bar|$HOME/task-app|g" com.todobar.app.plist
+   ```
+
+4. **Set up your own credentials** — this app reads credentials from your home directory (`~/.gmail-mcp/`, `~/.todo-bar/`), never from the repo itself. Follow [Setup](#setup) above to create your own Google OAuth client and, optionally, your own Slack app/token. Nobody else's tokens or data are included in this repo.
+
+5. **Make it yours** — the app is a single `app.py` file (~3,500 lines) using PyObjC for the menu bar UI. Sync logic for each source (Gmail, Docs, Slack, Google Tasks) is broken into its own `run_*_sync()` function, so it's straightforward to add a new source, change what counts as a task, or adjust the UI without touching unrelated code.
+
+6. **Push changes to your own fork** — if you want to keep your customizations separate, fork the repo on GitHub first and change your `origin` remote to point at your fork before pushing.
+
 ## Known limitations
 
 - Slack's "Later" (saved items) API is locked down by Slack for third-party apps — `stars.list` and `saved.list` are not accessible. An emoji-reaction-based alternative is being explored.
